@@ -9,6 +9,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/bradleyfalzon/ghinstallation"
 	"github.com/google/go-github/github"
@@ -51,6 +52,7 @@ func run(ctx context.Context, client *github.Client, config *Config) error {
 		if err != nil {
 			log.Fatal(err)
 		}
+		limitWait(&resp.Rate)
 		for _, repo := range repos {
 			repoName := repo.GetName()
 			for _, setting := range config.Settings {
@@ -67,33 +69,12 @@ func run(ctx context.Context, client *github.Client, config *Config) error {
 					eg.Go(func() error {
 						return featuresSync(ctx, client, repo.GetFullName(), setting.Features)
 					})
-					listBranchOpt := github.ListOptions{}
-					for {
-						branches, resp, err := client.Repositories.ListBranches(context.Background(), ownerName, repoName, &listBranchOpt)
-						if err != nil {
-							return fmt.Errorf("list branch: %w", err)
-						}
-						for i := range branches {
-							branch := branches[i].GetName()
-							for branchRegexp := range setting.Branches {
-								match, err := regexp.MatchString(branchRegexp, branch)
-								if err != nil {
-									return fmt.Errorf("%s match %s failed: %w", branchRegexp, branch, err)
-								}
-								if !match {
-									continue
-								}
-								log.Println("\t", branchRegexp, "match to", branchRegexp)
-								eg.Go(func() error {
-									return branchesSync(ctx, client, ownerName, repoName, branch, setting.Branches[branchRegexp])
-								})
-								break
-							}
-						}
-						if resp.NextPage == 0 {
-							break
-						}
-						listBranchOpt.Page = resp.NextPage
+					for branchRule := range setting.Branches {
+						log.Println("\t", branchRule)
+						branch := branchRule
+						eg.Go(func() error {
+							return branchesSync(ctx, client, ownerName, repoName, branch, setting.Branches[branch])
+						})
 					}
 					err = eg.Wait()
 					if err != nil {
@@ -106,7 +87,6 @@ func run(ctx context.Context, client *github.Client, config *Config) error {
 			break
 		}
 		opt.Page = resp.NextPage
-
 	}
 
 	return nil
@@ -133,6 +113,7 @@ func featuresSync(ctx context.Context, client *github.Client, repo string, featu
 	}
 	return nil
 }
+
 func branchesSync(ctx context.Context, client *github.Client, owner, repo string, branch string, setting Branches) error {
 	var req github.ProtectionRequest
 
@@ -174,4 +155,12 @@ func branchesSync(ctx context.Context, client *github.Client, owner, repo string
 func split(repo string) (string, string) {
 	arr := strings.SplitN(repo, "/", 3)
 	return arr[0], arr[1]
+}
+
+func limitWait(rate *github.Rate) {
+	if rate.Remaining < 100 {
+		d := time.Until(rate.Reset.Time) + time.Minute
+		log.Println("limit wait", d)
+		time.Sleep(d)
+	}
 }
