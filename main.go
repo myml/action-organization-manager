@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -9,9 +10,12 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/bradleyfalzon/ghinstallation"
 	"github.com/google/go-github/github"
+	"github.com/shurcooL/githubv4"
+	"github.com/shurcooL/graphql"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -37,13 +41,14 @@ func main() {
 		log.Fatal(err)
 	}
 	client := github.NewClient(&http.Client{Transport: itr})
-	err = run(context.Background(), client, config)
+	clientv4 := githubv4.NewClient(&http.Client{Transport: itr})
+	err = run(context.Background(), client, clientv4, config)
 	if err != nil {
 		log.Fatal(err)
 	}
 }
 
-func run(ctx context.Context, client *github.Client, config *Config) error {
+func run(ctx context.Context, client *github.Client, clientv4 *githubv4.Client, config *Config) error {
 	opt := github.RepositoryListByOrgOptions{}
 	for {
 		ownerName := config.Organization
@@ -51,6 +56,7 @@ func run(ctx context.Context, client *github.Client, config *Config) error {
 		if err != nil {
 			log.Fatal(err)
 		}
+		limitWait(&resp.Rate)
 		for _, repo := range repos {
 			repoName := repo.GetName()
 			for _, setting := range config.Settings {
@@ -67,33 +73,12 @@ func run(ctx context.Context, client *github.Client, config *Config) error {
 					eg.Go(func() error {
 						return featuresSync(ctx, client, repo.GetFullName(), setting.Features)
 					})
-					listBranchOpt := github.ListOptions{}
-					for {
-						branches, resp, err := client.Repositories.ListBranches(context.Background(), ownerName, repoName, &listBranchOpt)
-						if err != nil {
-							return fmt.Errorf("list branch: %w", err)
-						}
-						for i := range branches {
-							branch := branches[i].GetName()
-							for branchRegexp := range setting.Branches {
-								match, err := regexp.MatchString(branchRegexp, branch)
-								if err != nil {
-									return fmt.Errorf("%s match %s failed: %w", branchRegexp, branch, err)
-								}
-								if !match {
-									continue
-								}
-								log.Println("\t", branchRegexp, "match to", branchRegexp)
-								eg.Go(func() error {
-									return branchesSync(ctx, client, ownerName, repoName, branch, setting.Branches[branchRegexp])
-								})
-								break
-							}
-						}
-						if resp.NextPage == 0 {
-							break
-						}
-						listBranchOpt.Page = resp.NextPage
+					for branchRule := range setting.Branches {
+						log.Println("\t", branchRule)
+						branch := branchRule
+						eg.Go(func() error {
+							return branchesSync(ctx, client, clientv4, ownerName, repoName, branch, setting.Branches[branch])
+						})
 					}
 					err = eg.Wait()
 					if err != nil {
@@ -106,7 +91,6 @@ func run(ctx context.Context, client *github.Client, config *Config) error {
 			break
 		}
 		opt.Page = resp.NextPage
-
 	}
 
 	return nil
@@ -133,40 +117,118 @@ func featuresSync(ctx context.Context, client *github.Client, repo string, featu
 	}
 	return nil
 }
-func branchesSync(ctx context.Context, client *github.Client, owner, repo string, branch string, setting Branches) error {
-	var req github.ProtectionRequest
 
-	if setting.EnforceAdmins != nil {
-		req.EnforceAdmins = *setting.EnforceAdmins
+func branchesSync(ctx context.Context, client *github.Client, clientv4 *githubv4.Client, owner, repo string, branch string, setting Branches) error {
+	var q struct {
+		Repository struct {
+			ID                    githubv4.ID
+			BranchProtectionRules struct {
+				Nodes []struct {
+					ID      githubv4.ID
+					Pattern githubv4.String
+				}
+				PageInfo struct {
+					EndCursor   githubv4.String
+					HasNextPage bool
+				}
+			} `graphql:"branchProtectionRules(first: 100, after: $cursor)"`
+		} `graphql:"repository(owner: $owner, name: $name)"`
 	}
-	if setting.DismissStaleReviews != nil {
-		if req.RequiredPullRequestReviews == nil {
-			req.RequiredPullRequestReviews = &github.PullRequestReviewsEnforcementRequest{}
-		}
-		req.RequiredPullRequestReviews.DismissStaleReviews = *setting.DismissStaleReviews
+	input := map[string]interface{}{
+		"owner":  githubv4.String(owner),
+		"name":   githubv4.String(repo),
+		"cursor": (*githubv4.String)(nil),
 	}
-	if setting.RequiredApprovingReviewCount != nil {
-		if req.RequiredPullRequestReviews == nil {
-			req.RequiredPullRequestReviews = &github.PullRequestReviewsEnforcementRequest{}
-		}
-		req.RequiredPullRequestReviews.RequiredApprovingReviewCount = *setting.RequiredApprovingReviewCount
-	}
-
-	if setting.RequiredStatusChecks.Strict != nil {
-		if req.RequiredStatusChecks == nil {
-			req.RequiredStatusChecks = &github.RequiredStatusChecks{Contexts: []string{}}
-		}
-		req.RequiredStatusChecks.Strict = *setting.RequiredStatusChecks.Strict
-	}
-	if setting.RequiredStatusChecks.Content != nil {
-		if req.RequiredStatusChecks == nil {
-			req.RequiredStatusChecks = &github.RequiredStatusChecks{}
-		}
-		req.RequiredStatusChecks.Contexts = setting.RequiredStatusChecks.Content
-	}
-	_, _, err := client.Repositories.UpdateBranchProtection(ctx, owner, repo, branch, &req)
+	err := clientv4.Query(context.Background(), &q, input)
 	if err != nil {
-		return fmt.Errorf("update branch protection: %w", err)
+		return fmt.Errorf("get branch protection list: %w", err)
+	}
+	var exists githubv4.ID
+	for _, rule := range q.Repository.BranchProtectionRules.Nodes {
+		if rule.Pattern == githubv4.String(branch) {
+			exists = rule.ID
+		}
+	}
+	pattern := githubv4.NewString(githubv4.String(branch))
+	if exists != nil {
+		var c struct {
+			UpdateBranchProtectionRule struct {
+				BranchProtectionRule struct {
+					ID      githubv4.ID
+					Pattern githubv4.String
+				}
+			} `graphql:"updateBranchProtectionRule(input: $input)"`
+		}
+		cin := githubv4.UpdateBranchProtectionRuleInput{
+			BranchProtectionRuleID: exists,
+			Pattern:                pattern,
+		}
+		if setting.EnforceAdmins != nil {
+			cin.IsAdminEnforced = (*githubv4.Boolean)(setting.EnforceAdmins)
+		}
+		if setting.DismissStaleReviews != nil {
+			cin.DismissesStaleReviews = (*githubv4.Boolean)(setting.DismissStaleReviews)
+		}
+		if setting.RequiredApprovingReviewCount != nil {
+			if *setting.RequiredApprovingReviewCount == 0 {
+				cin.RequiresApprovingReviews = githubv4.NewBoolean(false)
+				cin.RequiredApprovingReviewCount = githubv4.NewInt(0)
+			} else {
+				cin.RequiresApprovingReviews = githubv4.NewBoolean(true)
+				cin.RequiredApprovingReviewCount = githubv4.NewInt(githubv4.Int(graphql.Int(*setting.RequiredApprovingReviewCount)))
+			}
+		}
+		if setting.RequiredStatusChecks.Strict != nil {
+			cin.RequiresStatusChecks = githubv4.NewBoolean(true)
+			cin.RequiresStrictStatusChecks = (*githubv4.Boolean)(setting.RequiredStatusChecks.Strict)
+		}
+		if setting.RequiredStatusChecks.Content != nil {
+			var v []githubv4.String
+			for i := range setting.RequiredStatusChecks.Content {
+				v = append(v, githubv4.String(setting.RequiredStatusChecks.Content[i]))
+			}
+			cin.RequiresStatusChecks = githubv4.NewBoolean(true)
+			cin.RequiredStatusCheckContexts = &v
+		}
+		data, _ := json.MarshalIndent(cin, "", "\t")
+		log.Println(string(data))
+		err = clientv4.Mutate(context.Background(), &c, cin, nil)
+	} else {
+		var c struct {
+			CreateBranchProtectionRule struct {
+				BranchProtectionRule struct {
+					ID      githubv4.ID
+					Pattern githubv4.String
+				}
+			} `graphql:"createBranchProtectionRule(input: $input)"`
+		}
+		cin := githubv4.CreateBranchProtectionRuleInput{
+			RepositoryID: q.Repository.ID,
+			Pattern:      *pattern,
+		}
+		if setting.EnforceAdmins != nil {
+			cin.IsAdminEnforced = (*githubv4.Boolean)(setting.EnforceAdmins)
+		}
+		if setting.DismissStaleReviews != nil {
+			cin.DismissesStaleReviews = (*githubv4.Boolean)(setting.DismissStaleReviews)
+		}
+		if setting.RequiredApprovingReviewCount != nil {
+			cin.RequiredApprovingReviewCount = githubv4.NewInt(githubv4.Int(graphql.Int(*setting.RequiredApprovingReviewCount)))
+		}
+		if setting.RequiredStatusChecks.Strict != nil {
+			cin.RequiresStrictStatusChecks = (*githubv4.Boolean)(setting.RequiredStatusChecks.Strict)
+		}
+		if setting.RequiredStatusChecks.Content != nil {
+			var v []githubv4.String
+			for i := range setting.RequiredStatusChecks.Content {
+				v = append(v, githubv4.String(setting.RequiredStatusChecks.Content[i]))
+			}
+			cin.RequiredStatusCheckContexts = &v
+		}
+		err = clientv4.Mutate(context.Background(), &c, cin, nil)
+	}
+	if err != nil {
+		return fmt.Errorf("update branch protection list: %w", err)
 	}
 	return nil
 }
@@ -174,4 +236,12 @@ func branchesSync(ctx context.Context, client *github.Client, owner, repo string
 func split(repo string) (string, string) {
 	arr := strings.SplitN(repo, "/", 3)
 	return arr[0], arr[1]
+}
+
+func limitWait(rate *github.Rate) {
+	if rate.Remaining < 100 {
+		d := time.Until(rate.Reset.Time) + time.Minute
+		log.Println("limit wait", d)
+		time.Sleep(d)
+	}
 }

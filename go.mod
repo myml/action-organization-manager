@@ -9,6 +9,12 @@ require (
 )
 
 require (
+	github.com/shurcooL/githubv4 v0.0.0-20221203213311-70889c5dac07 // indirect
+	github.com/shurcooL/graphql v0.0.0-20220606043923-3cf50f8a0a29 // indirect
+	golang.org/x/net v0.4.0 // indirect
+)
+
+require (
 	github.com/dgrijalva/jwt-go v3.2.0+incompatible // indirect
 	github.com/google/go-github/v29 v29.0.2 // indirect
 	github.com/google/go-querystring v1.0.0 // indirect

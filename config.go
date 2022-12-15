@@ -34,7 +34,7 @@ type FeatureOption struct {
 type Branches struct {
 	DismissStaleReviews          *bool                `yaml:"dismiss_stale_reviews"`
 	EnforceAdmins                *bool                `yaml:"enforce_admins"`
-	RequiredApprovingReviewCount *int                 `yaml:"required_approving_review_count"`
+	RequiredApprovingReviewCount *int32               `yaml:"required_approving_review_count"`
 	RequiredStatusChecks         RequiredStatusChecks `yaml:"required_status_checks"`
 }
 type RequiredStatusChecks struct {
