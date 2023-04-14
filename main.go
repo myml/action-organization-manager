@@ -16,7 +16,6 @@ import (
 	"github.com/google/go-github/github"
 	"github.com/shurcooL/githubv4"
 	"github.com/shurcooL/graphql"
-	"golang.org/x/sync/errgroup"
 )
 
 func main() {
@@ -58,6 +57,7 @@ func run(ctx context.Context, client *github.Client, clientv4 *githubv4.Client, 
 		if err != nil {
 			log.Fatal(err)
 		}
+		time.Sleep(time.Second)
 		limitWait(&resp.Rate)
 		for _, repo := range repos {
 			repoName := repo.GetName()
@@ -71,20 +71,21 @@ func run(ctx context.Context, client *github.Client, clientv4 *githubv4.Client, 
 						continue
 					}
 					log.Println(repoRegexp, "match to", repo.GetFullName())
-					eg, ctx := errgroup.WithContext(ctx)
-					eg.Go(func() error {
-						return featuresSync(ctx, client, repo.GetFullName(), setting.Features)
-					})
-					for branchRule := range setting.Branches {
-						log.Println("\t", branchRule)
-						branch := branchRule
-						eg.Go(func() error {
-							return branchesSync(ctx, client, clientv4, ownerName, repoName, branch, setting.Branches[branch])
-						})
-					}
-					err = eg.Wait()
+
+					resp, err = featuresSync(ctx, client, repo.GetFullName(), setting.Features)
 					if err != nil {
 						return err
+					}
+					time.Sleep(time.Second)
+					limitWait(&resp.Rate)
+
+					for branchRule := range setting.Branches {
+						log.Println("\t", branchRule)
+						err := branchesSync(ctx, client, clientv4, ownerName, repoName, branchRule, setting.Branches[branchRule])
+						if err != nil {
+							return err
+						}
+						time.Sleep(time.Second)
 					}
 				}
 			}
@@ -98,7 +99,7 @@ func run(ctx context.Context, client *github.Client, clientv4 *githubv4.Client, 
 	return nil
 }
 
-func featuresSync(ctx context.Context, client *github.Client, repo string, features Features) error {
+func featuresSync(ctx context.Context, client *github.Client, repo string, features Features) (*github.Response, error) {
 	var r github.Repository
 	if features.Issues.Enable != nil {
 		r.HasIssues = features.Issues.Enable
@@ -113,11 +114,11 @@ func featuresSync(ctx context.Context, client *github.Client, repo string, featu
 	r.AllowRebaseMerge = features.AllowRebaseMerge.Enable
 	r.AllowSquashMerge = features.AllowSquashMerge.Enable
 	owner, repo := split(repo)
-	_, _, err := client.Repositories.Edit(ctx, owner, repo, &r)
+	_, resp, err := client.Repositories.Edit(ctx, owner, repo, &r)
 	if err != nil {
-		return fmt.Errorf("edit repo: %w", err)
+		return nil, fmt.Errorf("edit repo: %w", err)
 	}
-	return nil
+	return resp, nil
 }
 
 func branchesSync(ctx context.Context, client *github.Client, clientv4 *githubv4.Client, owner, repo string, branch string, setting Branches) error {
