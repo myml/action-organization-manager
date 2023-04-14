@@ -49,7 +49,9 @@ func main() {
 }
 
 func run(ctx context.Context, client *github.Client, clientv4 *githubv4.Client, config *Config) error {
-	opt := github.RepositoryListByOrgOptions{}
+	opt := github.RepositoryListByOrgOptions{
+		Type: "public",
+	}
 	for {
 		ownerName := config.Organization
 		repos, resp, err := client.Repositories.ListByOrg(context.Background(), ownerName, &opt)
