@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -61,6 +60,7 @@ func run(ctx context.Context, client *github.Client, clientv4 *githubv4.Client, 
 		limitWait(&resp.Rate)
 		for _, repo := range repos {
 			repoName := repo.GetName()
+			log.Println("find repo:", repo.FullName)
 			for _, setting := range config.Settings {
 				for _, repoRegexp := range setting.Repositories {
 					match, err := regexp.MatchString(repoRegexp, repoName)
@@ -70,7 +70,7 @@ func run(ctx context.Context, client *github.Client, clientv4 *githubv4.Client, 
 					if !match {
 						continue
 					}
-					log.Println(repoRegexp, "match to", repo.GetFullName())
+					log.Println("match to setting:", repoRegexp)
 
 					resp, err = featuresSync(ctx, client, repo.GetFullName(), setting.Features)
 					if err != nil {
@@ -95,7 +95,6 @@ func run(ctx context.Context, client *github.Client, clientv4 *githubv4.Client, 
 		}
 		opt.Page = resp.NextPage
 	}
-
 	return nil
 }
 
@@ -193,9 +192,11 @@ func branchesSync(ctx context.Context, client *github.Client, clientv4 *githubv4
 			cin.RequiresStatusChecks = githubv4.NewBoolean(true)
 			cin.RequiredStatusCheckContexts = &v
 		}
-		data, _ := json.MarshalIndent(cin, "", "\t")
-		log.Println(string(data))
 		err = clientv4.Mutate(context.Background(), &c, cin, nil)
+		if err != nil {
+			return fmt.Errorf("update branch protection: %w", err)
+		}
+		log.Println("update branch protection", branch)
 	} else {
 		var c struct {
 			CreateBranchProtectionRule struct {
@@ -229,9 +230,10 @@ func branchesSync(ctx context.Context, client *github.Client, clientv4 *githubv4
 			cin.RequiredStatusCheckContexts = &v
 		}
 		err = clientv4.Mutate(context.Background(), &c, cin, nil)
-	}
-	if err != nil {
-		return fmt.Errorf("update branch protection list: %w", err)
+		if err != nil {
+			return fmt.Errorf("create branch protection: %w", err)
+		}
+		log.Println("create branch protection", branch)
 	}
 	return nil
 }
