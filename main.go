@@ -52,15 +52,15 @@ func run(ctx context.Context, client *github.Client, clientv4 *githubv4.Client, 
 	}
 	for {
 		ownerName := config.Organization
-		repos, resp, err := client.Repositories.ListByOrg(context.Background(), ownerName, &opt)
+		repos, pageResp, err := client.Repositories.ListByOrg(context.Background(), ownerName, &opt)
 		if err != nil {
 			log.Fatal(err)
 		}
 		time.Sleep(time.Second)
-		limitWait(&resp.Rate)
+		limitWait(&pageResp.Rate)
 		for _, repo := range repos {
 			repoName := repo.GetName()
-			log.Println("find repo:", repo.FullName)
+			log.Println("find repo:", *repo.FullName)
 			for _, setting := range config.Settings {
 				for _, repoRegexp := range setting.Repositories {
 					match, err := regexp.MatchString(repoRegexp, repoName)
@@ -72,7 +72,7 @@ func run(ctx context.Context, client *github.Client, clientv4 *githubv4.Client, 
 					}
 					log.Println("match to setting:", repoRegexp)
 
-					resp, err = featuresSync(ctx, client, repo.GetFullName(), setting.Features)
+					resp, err := featuresSync(ctx, client, repo.GetFullName(), setting.Features)
 					if err != nil {
 						return err
 					}
@@ -90,10 +90,10 @@ func run(ctx context.Context, client *github.Client, clientv4 *githubv4.Client, 
 				}
 			}
 		}
-		if resp.NextPage == 0 {
+		if pageResp.NextPage == 0 {
 			break
 		}
-		opt.Page = resp.NextPage
+		opt.Page = pageResp.NextPage
 	}
 	return nil
 }
